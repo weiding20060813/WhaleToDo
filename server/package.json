@@ -1,0 +1,28 @@
+{
+  "name": "whaletodo-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WhaleToDo 后端：账户 / 签到积分 / 订单 / 同步（Weiding 主责）",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "test:watch": "node --test --watch test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "dev": "node --watch src/main.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.1.0",
+    "argon2": "^0.41.1",
+    "fastify": "^5.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "prisma": "^6.1.0",
+    "typescript": "^5.7.2"
+  }
+}
