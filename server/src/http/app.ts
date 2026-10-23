@@ -5,6 +5,9 @@ import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { ApiError } from '../lib/security.ts';
 import { MemoryRepository } from '../repo/memory.ts';
 import type { ServerConfig } from '../config.ts';
+import { businessDate } from '../config.ts';
+import { claimDailyReward, paginateLedger, DEFAULT_REWARD_POINTS } from '../domain/rewards.ts';
+import type { LedgerRow } from '../domain/rewards.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -200,6 +203,88 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       vip: { active: false, expires_at: null },      // 具体权益待定，不默认无限调用
       balance: { available: wallet.available, reserved: wallet.reserved },
       daily_quota: { claimed_today: false, points: 0, reward_points: 0 },
+    });
+  });
+
+  /* ---------- 签到与积分（内存实现；接 Prisma 后换成事务 + 唯一约束） ---------- */
+  // key = `${userId}:${businessDate}:${rewardType}`；数据库落地后由唯一键保证
+  const claims = new Map<string, number>();
+  const ledgerRows: LedgerRow[] = [];
+
+  app.get('/api/v1/rewards/daily', async (req) => {
+    await requireAuth(req);
+    const date = businessDate(new Date(), config.businessTimezone);
+    const claimed = claims.has(`${req.userId}:${date}:sign_in`);
+    const wallet = repo.walletOf(req.userId!);
+    return ok(req.requestId, {
+      business_date: date,
+      claimed,
+      reward: { reward_type: 'sign_in', points: DEFAULT_REWARD_POINTS },
+      balance: { available: wallet.available, reserved: wallet.reserved },
+    });
+  });
+
+  app.post('/api/v1/rewards/daily/claim', async (req, reply) => {
+    await requireAuth(req);
+    const date = businessDate(new Date(), config.businessTimezone);
+    const claimKey = `${req.userId}:${date}:sign_in`;
+    const wallet = repo.walletOf(req.userId!);
+    const idemKey = String(req.headers['idempotency-key'] ?? '').trim();
+
+    // 幂等：同 key 重放直接返回首次结果（客户端重试不会重复领奖）
+    if (idemKey) {
+      const hit = repo.getIdempotent(`claim:${req.userId}:${idemKey}`);
+      if (hit) return reply.code(200).send(hit.response);
+    }
+
+    const result = claimDailyReward({
+      alreadyClaimed: claims.has(claimKey),
+      businessDate: date,
+      rewardPoints: DEFAULT_REWARD_POINTS,
+      wallet,
+      eventId: claimKey,
+      requestId: req.requestId,
+    });
+
+    claims.set(claimKey, result.pointsAwarded);
+    repo.setWallet(req.userId!, result.wallet);
+    ledgerRows.unshift({
+      id: randomUUID(),
+      type: 'award',
+      delta: result.pointsAwarded,
+      balanceAfter: result.wallet.available,
+      reservedAfter: result.wallet.reserved,
+      requestId: req.requestId,
+      reason: result.event.reason ?? null,
+      createdAt: Date.now(),
+    });
+
+    const response = ok(req.requestId, {
+      business_date: date,
+      points_awarded: result.pointsAwarded,
+      wallet: { available: result.wallet.available, reserved: result.wallet.reserved },
+    });
+    if (idemKey) repo.saveIdempotent(`claim:${req.userId}:${idemKey}`, fingerprintOf({ date }), response);
+    return reply.code(201).send(response);
+  });
+
+  app.get('/api/v1/wallet', async (req) => {
+    await requireAuth(req);
+    const w = repo.walletOf(req.userId!);
+    return ok(req.requestId, { available: w.available, reserved: w.reserved, total: w.available + w.reserved });
+  });
+
+  app.get('/api/v1/wallet/ledger', async (req) => {
+    await requireAuth(req);
+    const q = (req.query ?? {}) as { limit?: string; cursor?: string };
+    const page = paginateLedger(ledgerRows, Number(q.limit ?? 50), Number(q.cursor ?? 0));
+    return ok(req.requestId, {
+      items: page.items.map((r) => ({
+        id: r.id, type: r.type, delta: r.delta,
+        balance_after: r.balanceAfter, reserved_after: r.reservedAfter,
+        request_id: r.requestId, reason: r.reason, created_at: r.createdAt,
+      })),
+      next_cursor: page.next_cursor,
     });
   });
 
