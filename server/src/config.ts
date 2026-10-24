@@ -16,6 +16,10 @@ export interface ServerConfig {
    * 部署时**只应信任回环或实际代理地址**，不能对任意来源盲信 X-Forwarded-*。
    */
   trustProxy: boolean | string;
+  /** 注册/登录限流：窗口内最大尝试次数 */
+  rateLimitMaxAttempts: number;
+  /** 注册/登录限流：窗口长度（毫秒） */
+  rateLimitWindowMs: number;
 }
 
 const ALLOWED_ENVS = ['development', 'test', 'demo', 'production'] as const;
@@ -83,6 +87,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     mockWebhookToken,
     publicBaseUrl: (env.PUBLIC_BASE_URL ?? 'http://127.0.0.1:8080/api/v1').replace(/\/$/, ''),
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
+    rateLimitMaxAttempts: parseIntEnv(env.RATE_LIMIT_MAX_ATTEMPTS, 10, 'RATE_LIMIT_MAX_ATTEMPTS'),
+    rateLimitWindowMs: parseIntEnv(env.RATE_LIMIT_WINDOW_MS, 5 * 60 * 1000, 'RATE_LIMIT_WINDOW_MS'),
   };
 }
 

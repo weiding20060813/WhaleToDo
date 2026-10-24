@@ -1,7 +1,7 @@
 // 内存仓储：用于本地开发与集成测试（无数据库依赖）。
 // Prisma 仓储在下一阶段接入，接口保持一致，便于替换。
 import { randomUUID } from 'node:crypto';
-import { hashPassword, verifyPassword, issueTokens, hashToken } from '../lib/security.ts';
+import { hashPasswordAsync, verifyPasswordAsync, issueTokens, hashToken } from '../lib/security.ts';
 import type { Wallet } from '../domain/ledger.ts';
 
 export interface User {
@@ -63,11 +63,11 @@ export class MemoryRepository {
     return this.store.users.get(id) ?? null;
   }
 
-  createUser(username: string, password: string, displayName?: string): User {
+  async createUser(username: string, password: string, displayName?: string): Promise<User> {
     const user: User = {
       id: randomUUID(),
       username,
-      passwordHash: hashPassword(password),
+      passwordHash: await hashPasswordAsync(password),
       displayName: (displayName ?? username).slice(0, 32),
       createdAt: this.now(),
     };
@@ -77,14 +77,14 @@ export class MemoryRepository {
     return user;
   }
 
-  authenticate(username: string, password: string): User | null {
+  async authenticate(username: string, password: string): Promise<User | null> {
     const user = this.findUserByUsername(username);
     if (!user) {
       // 即使账号不存在也跑一次哈希，避免用响应时间探测用户是否存在
-      hashPassword('dummy-password-for-timing');
+      await hashPasswordAsync('dummy-password-for-timing');
       return null;
     }
-    return verifyPassword(password, user.passwordHash) ? user : null;
+    return (await verifyPasswordAsync(password, user.passwordHash)) ? user : null;
   }
 
   createSession(userId: string, familyId?: string): { session: Session; tokens: ReturnType<typeof issueTokens> } {

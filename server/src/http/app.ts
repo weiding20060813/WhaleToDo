@@ -3,6 +3,7 @@
 import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyReply } from 'fastify';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { ApiError } from '../lib/security.ts';
+import { FixedWindowLimiter } from '../lib/rateLimit.ts';
 import { MemoryRepository } from '../repo/memory.ts';
 import type { ServerConfig } from '../config.ts';
 
@@ -39,6 +40,11 @@ function fingerprintOf(body: unknown): string {
 
 export function buildApp(deps: AppDeps): FastifyInstance {
   const { config, repo } = deps;
+
+  // 限流：注册按 IP 计次（每次尝试都算）；登录只计失败次数，成功即清零。
+  // 单进程内存实现，多实例部署时需换共享存储（见 handoff 说明）。
+  const registerLimiter = new FixedWindowLimiter(config.rateLimitMaxAttempts, config.rateLimitWindowMs);
+  const loginLimiter = new FixedWindowLimiter(config.rateLimitMaxAttempts, config.rateLimitWindowMs);
   const app = Fastify({
     logger: deps.logger ?? false,
     trustProxy: config.trustProxy,
@@ -90,6 +96,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   /* ---------- 注册 ---------- */
   app.post('/api/v1/auth/register', async (req, reply) => {
+    const regKey = `ip:${req.ip}`;
+    const regLimit = registerLimiter.hit(regKey);
+    if (!regLimit.allowed) {
+      throw new ApiError('RATE_LIMITED', '注册请求过于频繁，请稍后再试', { retry_after_ms: regLimit.retryAfterMs });
+    }
     const body = (req.body ?? {}) as { username?: string; password?: string; display_name?: string };
     const username = String(body.username ?? '').trim();
     const password = String(body.password ?? '');
@@ -116,7 +127,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     if (repo.findUserByUsername(username)) {
       throw new ApiError('CONFLICT', '用户名已被占用');
     }
-    const user = repo.createUser(username, password, body.display_name);
+    const user = await repo.createUser(username, password, body.display_name);
     const response = ok(req.requestId, {
       user: { id: user.id, username: user.username, display_name: user.displayName },
     });
@@ -126,14 +137,22 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   /* ---------- 登录 ---------- */
   app.post('/api/v1/auth/login', async (req) => {
+    const loginKey = `ip:${req.ip}`;
     const body = (req.body ?? {}) as { username?: string; password?: string };
     const username = String(body.username ?? '').trim();
     const password = String(body.password ?? '');
     if (!username || !password) throw new ApiError('VALIDATION_ERROR', '用户名与密码不能为空');
 
-    const user = repo.authenticate(username, password);
+    const user = await repo.authenticate(username, password);
     // 账号不存在与密码错误返回同一个错误，避免枚举账号
-    if (!user) throw new ApiError('UNAUTHENTICATED', '用户名或密码错误');
+    if (!user) {
+      const limit = loginLimiter.hit(loginKey);
+      if (!limit.allowed) {
+        throw new ApiError('RATE_LIMITED', '登录失败次数过多，请稍后再试', { retry_after_ms: limit.retryAfterMs });
+      }
+      throw new ApiError('UNAUTHENTICATED', '用户名或密码错误');
+    }
+    loginLimiter.reset(loginKey);
 
     const { tokens } = repo.createSession(user.id);
     return ok(req.requestId, {

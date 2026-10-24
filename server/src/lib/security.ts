@@ -1,6 +1,6 @@
 // 安全基础：错误码、密码哈希、不透明令牌
 // 说明：Node 24 可直接运行本文件（类型剥离），无需构建；依赖第三方包的部分留待后续接入。
-import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
+import { randomBytes, scrypt, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
 
 /* ---------------- 统一错误码（与《接口与数据契约草案》一致） ---------------- */
 export const ERROR_CODES = {
@@ -114,4 +114,42 @@ export function matchTokenDigest(rawToken: string, storedDigest: string): boolea
   const a = Buffer.from(hashToken(rawToken), 'utf8');
   const b = Buffer.from(String(storedDigest), 'utf8');
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+
+/* ---------------- 异步版本（请求路径必须用这个） ---------------- */
+// scryptSync 会阻塞事件循环：并发注册/登录时整个进程被卡住。
+function scryptAsync(
+  password: string, salt: Buffer, keylen: number, opts: { N: number; r: number; p: number },
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scrypt(password, salt, keylen, { ...opts, maxmem: SCRYPT.maxmem }, (err, key) => {
+      if (err) reject(err); else resolve(key);
+    });
+  });
+}
+
+export async function hashPasswordAsync(password: string): Promise<string> {
+  if (typeof password !== 'string' || password.length < 8 || password.length > 200) {
+    throw new ApiError('VALIDATION_ERROR', '密码长度需在 8~200 字符之间');
+  }
+  const salt = randomBytes(SCRYPT.saltLen);
+  const key = await scryptAsync(password.normalize('NFKC'), salt, SCRYPT.keylen, SCRYPT);
+  return `scrypt$${SCRYPT.N}$${SCRYPT.r}$${SCRYPT.p}$${salt.toString('base64url')}$${key.toString('base64url')}`;
+}
+
+export async function verifyPasswordAsync(password: string, stored: string): Promise<boolean> {
+  try {
+    const [scheme, n, r, p, saltB64, keyB64] = String(stored).split('$');
+    if (scheme !== 'scrypt') return false;
+    if (!n || !r || !p || !saltB64 || !keyB64) return false;
+    const salt = Buffer.from(saltB64, 'base64url');
+    const expected = Buffer.from(keyB64, 'base64url');
+    const actual = await scryptAsync(String(password).normalize('NFKC'), salt, expected.length, {
+      N: Number(n), r: Number(r), p: Number(p),
+    });
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
 }
