@@ -8,6 +8,8 @@ import type { ServerConfig } from '../config.ts';
 import { businessDate } from '../config.ts';
 import { claimDailyReward, paginateLedger, DEFAULT_REWARD_POINTS } from '../domain/rewards.ts';
 import type { LedgerRow } from '../domain/rewards.ts';
+import { buildOrder, applyPaymentResult, assertMockWebhookAllowed } from '../domain/billing.ts';
+import type { Order, Product, Entitlement } from '../domain/billing.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -34,6 +36,15 @@ function ok(requestId: string, data: unknown) {
  * 只存摘要，**不存原始请求体**——否则注册密码会以明文留在幂等缓存里。
  */
 const IDEMPOTENCY_FINGERPRINT_KEY = randomBytes(32);
+/** 订单对外视图（不暴露幂等键等内部字段） */
+function orderView(o: Order) {
+  return {
+    order_id: o.id, product_id: o.productId, amount_minor: o.amountMinor,
+    currency: o.currency, status: o.status, environment: o.environment,
+    created_at: o.createdAt, paid_at: o.paidAt,
+  };
+}
+
 function fingerprintOf(body: unknown): string {
   return createHmac('sha256', IDEMPOTENCY_FINGERPRINT_KEY)
     .update(JSON.stringify(body ?? null))
@@ -286,6 +297,102 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       })),
       next_cursor: page.next_cursor,
     });
+  });
+
+/* ---------- 商品、订单与模拟支付（内存实现；接 Prisma 后换事务） ---------- */
+  const products = new Map<string, Product>([
+    ['vip_30d', { productId: 'vip_30d', title: 'VIP 30 天', priceMinor: 1200, currency: 'CNY', vipDays: 30, points: 0, active: true }],
+    ['points_300', { productId: 'points_300', title: '积分 300', priceMinor: 600, currency: 'CNY', vipDays: 0, points: 300, active: true }],
+  ]);
+  const orders = new Map<string, Order>();
+  const orderIdem = new Map<string, string>();          // `${userId}:${key}` -> orderId
+  const paidEvents = new Set<string>();                  // `${provider}:${eventId}`
+  const entitlementsOf = new Map<string, Entitlement[]>(); // userId -> entitlements
+
+  app.get('/api/v1/products', async (req) => {
+    await requireAuth(req);
+    return ok(req.requestId, {
+      items: [...products.values()].filter((p) => p.active).map((p) => ({
+        product_id: p.productId, title: p.title,
+        price_minor: p.priceMinor, currency: p.currency,
+        vip_days: p.vipDays, points: p.points,
+      })),
+    });
+  });
+
+  app.post('/api/v1/orders', async (req, reply) => {
+    await requireAuth(req);
+    const body = (req.body ?? {}) as { product_id?: string };
+    const product = products.get(String(body.product_id ?? ''));
+    if (!product) throw new ApiError('VALIDATION_ERROR', '未知商品');
+
+    const idemKey = String(req.headers['idempotency-key'] ?? '').trim();
+    if (!idemKey) throw new ApiError('VALIDATION_ERROR', '缺少 Idempotency-Key');
+    const scoped = `${req.userId}:${idemKey}`;
+
+    const existed = orderIdem.get(scoped);
+    if (existed) {
+      const prev = orders.get(existed)!;
+      return reply.code(200).send(ok(req.requestId, orderView(prev)));
+    }
+
+    const order = buildOrder({
+      id: randomUUID(), userId: req.userId!, product, idempotencyKey: idemKey,
+      environment: config.paymentProvider === 'mock' ? 'mock' : 'production',
+      now: Date.now(),
+    });
+    orders.set(order.id, order);
+    orderIdem.set(scoped, order.id);
+    return reply.code(201).send(ok(req.requestId, orderView(order)));
+  });
+
+  app.get('/api/v1/orders/:id', async (req) => {
+    await requireAuth(req);
+    const { id } = req.params as { id: string };
+    const order = orders.get(id);
+    // 越权与不存在返回同一错误，避免枚举订单号
+    if (!order || order.userId !== req.userId) throw new ApiError('FORBIDDEN', '订单不存在或无权访问');
+    return ok(req.requestId, orderView(order));
+  });
+
+  app.post('/api/v1/payments/mock/webhook', async (req, reply) => {
+    assertMockWebhookAllowed(config.paymentProvider, String(req.headers['x-mock-token'] ?? ''), config.mockWebhookToken);
+    const body = (req.body ?? {}) as {
+      event_id?: string; order_id?: string; status?: string; amount_minor?: number; currency?: string;
+    };
+    const eventId = String(body.event_id ?? '');
+    const orderId = String(body.order_id ?? '');
+    const status = String(body.status ?? '') as 'succeeded' | 'failed' | 'refunded';
+    if (!eventId || !orderId) throw new ApiError('VALIDATION_ERROR', '缺少 event_id 或 order_id');
+    if (!['succeeded', 'failed', 'refunded'].includes(status)) throw new ApiError('VALIDATION_ERROR', '非法支付状态');
+
+    const dedupeKey = `mock:${eventId}`;
+    const order = orders.get(orderId);
+    if (!order) throw new ApiError('VALIDATION_ERROR', '订单不存在');
+
+    if (paidEvents.has(dedupeKey)) {
+      return reply.code(200).send(ok(req.requestId, { order_id: order.id, status: order.status, duplicated: true }));
+    }
+
+    const product = products.get(order.productId)!;
+    const applied = applyPaymentResult(order, {
+      eventId, status,
+      amountMinor: Number(body.amount_minor ?? order.amountMinor),
+      currency: String(body.currency ?? order.currency),
+    }, product, Date.now());
+
+    paidEvents.add(dedupeKey);
+    orders.set(applied.order.id, applied.order);
+    if (applied.entitlement) {
+      const list = entitlementsOf.get(applied.order.userId) ?? [];
+      list.push(applied.entitlement);
+      entitlementsOf.set(applied.order.userId, list);
+    }
+    return reply.code(200).send(ok(req.requestId, {
+      order_id: applied.order.id, status: applied.order.status,
+      entitlement: applied.entitlement ? { kind: applied.entitlement.kind, expires_at: applied.entitlement.expiresAt } : null,
+      duplicated: false,
+    }));
   });
 
   app.get('/api/v1/meta', async (req) => ok(req.requestId, {
