@@ -2,6 +2,7 @@
 // 端点全部挂在 /api/v1 下（与 Nginx 约定的 api.whaletodo.top:8443/api/v1 一致）。
 import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyReply } from 'fastify';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { ApiError } from '../lib/security.ts';
 import { MemoryRepository } from '../repo/memory.ts';
 import type { ServerConfig } from '../config.ts';
@@ -452,6 +453,16 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       has_more: page.has_more,
     });
   });
+
+  /* ---------- 本地演示页（无鉴权，仅本地开发用） ---------- */
+  const demoHtml = (() => {
+    try {
+      return readFileSync(new URL('../../public/demo.html', import.meta.url), 'utf8');
+    } catch {
+      return '<h1>demo.html 未找到（应在 server/public/demo.html）</h1>';
+    }
+  })();
+  app.get('/demo', async (_req, reply) => reply.type('text/html; charset=utf-8').send(demoHtml));
 
   app.get('/api/v1/meta', async (req) => ok(req.requestId, {
     api_version: 'v1',

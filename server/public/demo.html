@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WhaleToDo 后端本地 Demo</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.55 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         background: #0f1115; color: #e6e8eb; }
+  header { padding: 18px 22px; border-bottom: 1px solid #23262d; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  .muted { color: #8b929c; font-size: 12px; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 22px 40px; max-width: 1400px; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  section { background: #151922; border: 1px solid #23262d; border-radius: 10px; padding: 14px 16px; }
+  h2 { font-size: 13px; margin: 0 0 10px; color: #9aa4b2; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  input, button, select { font: inherit; border-radius: 7px; border: 1px solid #2c313a; background: #1b202a; color: #e6e8eb; padding: 7px 10px; }
+  input { min-width: 0; flex: 1 1 150px; }
+  button { cursor: pointer; background: #24303f; border-color: #32405a; }
+  button:hover { background: #2d3b4f; }
+  button.primary { background: #2563eb; border-color: #2563eb; }
+  button.primary:hover { background: #1d4ed8; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #log { grid-column: 1 / -1; background: #0b0d12; border: 1px solid #23262d; border-radius: 10px;
+         padding: 12px; height: 340px; overflow: auto; font: 12.5px/1.5 ui-monospace, Consolas, monospace; }
+  .entry { margin-bottom: 8px; white-space: pre-wrap; word-break: break-all; }
+  .req { color: #7dd3fc; }
+  .ok { color: #6ee7a8; }
+  .err { color: #f87171; }
+  .meta { color: #6b7280; }
+  .token { color: #fbbf24; }
+  code { background: #1b202a; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🐋 WhaleToDo 后端本地 Demo</h1>
+  <span class="muted">账户 / 签到积分 / 订单模拟支付 / 同步 —— 全部打到本地 8080</span>
+</header>
+
+<main>
+  <section>
+    <h2>① 连接</h2>
+    <div class="row">
+      <input id="base" value="http://127.0.0.1:8080/api/v1" />
+      <button onclick="checkHealth()">健康检查</button>
+    </div>
+    <div class="row">
+      <input id="username" placeholder="用户名（3~32 位字母数字下划线）" />
+      <button onclick="randomName()">随机</button>
+    </div>
+    <div class="row">
+      <input id="password" value="S3cret-passw0rd" />
+    </div>
+    <div class="row">
+      <button class="primary" onclick="register()">注册</button>
+      <button class="primary" onclick="login()">登录</button>
+      <button onclick="me()">我的资料</button>
+      <button onclick="logout()">退出登录</button>
+    </div>
+    <div class="muted">令牌状态：<span id="authState">未登录</span></div>
+  </section>
+
+  <section>
+    <h2>② 签到与积分</h2>
+    <div class="row">
+      <button onclick="rewardState()">查签到状态</button>
+      <button class="primary" onclick="claim()">领取签到</button>
+      <button onclick="claimSameKey()">用同一幂等键再领一次</button>
+    </div>
+    <div class="row">
+      <button onclick="wallet()">钱包余额</button>
+      <button onclick="ledger()">积分流水</button>
+    </div>
+    <div class="muted">预期：第一次 201 加 30 分；同日再领 409；幂等键重放返回首次结果。</div>
+  </section>
+
+  <section>
+    <h2>③ 商品 / 订单 / 模拟支付</h2>
+    <div class="row">
+      <button onclick="products()">商品列表</button>
+      <select id="product"><option value="vip_30d">vip_30d（VIP 30 天）</option><option value="points_300">points_300（积分 300）</option></select>
+      <button class="primary" onclick="createOrder()">下单</button>
+    </div>
+    <div class="row">
+      <button onclick="mockPay('succeeded')">模拟支付成功</button>
+      <button onclick="mockPay('failed')">模拟支付失败</button>
+      <button onclick="queryOrder()">查订单</button>
+    </div>
+    <div class="muted">目前 mock 通道只在服务端 <code>PAYMENT_PROVIDER=mock</code> 时可用。</div>
+  </section>
+
+  <section>
+    <h2>④ 同步</h2>
+    <div class="row">
+      <button class="primary" onclick="syncPush()">push 一批变更</button>
+      <button onclick="syncPull()">pull 变更</button>
+      <button onclick="syncConflict()">制造版本冲突</button>
+    </div>
+    <div class="muted">手动安排的 <code>locked:true</code> 会在 pull 时原样返回；版本落后会得到 conflict。</div>
+  </section>
+
+  <div id="log"></div>
+</main>
+
+<script>
+const logEl = document.getElementById('log');
+const authEl = document.getElementById('authState');
+let access = null, refresh = null, orderId = null, cursor = 0;
+
+const base = () => document.getElementById('base').value.replace(/\/$/, '');
+
+function log(kind, text) {
+  const div = document.createElement('div');
+  div.className = 'entry ' + kind;
+  div.textContent = text;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function maskTokens(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const copy = JSON.parse(JSON.stringify(obj));
+  for (const k of ['access_token', 'refresh_token']) {
+    if (copy[k]) copy[k] = copy[k].slice(0, 8) + '…（已截断，共 ' + copy[k].length + ' 字符）';
+  }
+  if (copy.data && typeof copy.data === 'object') {
+    for (const k of ['access_token', 'refresh_token']) {
+      if (copy.data[k]) copy.data[k] = copy.data[k].slice(0, 8) + '…（已截断）';
+    }
+  }
+  return copy;
+}
+
+async function call(method, path, body, opts = {}) {
+  const headers = { 'Accept': 'application/json' };
+  if (body) headers['Content-Type'] = 'application/json';
+  if (access && opts.auth !== false) headers['Authorization'] = 'Bearer ' + access;
+  if (opts.idempotencyKey) headers['Idempotency-Key'] = opts.idempotencyKey;
+  if (opts.extra) Object.assign(headers, opts.extra);
+
+  const url = base() + path;
+  log('req', `→ ${method} ${path}` + (body ? '\n  body: ' + JSON.stringify(body) : ''));
+  const started = performance.now();
+  let res, text;
+  try {
+    res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    text = await res.text();
+  } catch (e) {
+    log('err', `← 网络错误：${e.message}（服务端是否已启动？）`);
+    return null;
+  }
+  const ms = Math.round(performance.now() - started);
+  let parsed = null;
+  try { parsed = JSON.parse(text); } catch { /* 非 JSON */ }
+  const cls = res.ok ? 'ok' : 'err';
+  log(cls, `← ${res.status} (${ms}ms)  request_id=${(parsed && parsed.request_id) || res.headers.get('x-request-id') || '-'}\n` +
+            '  ' + JSON.stringify(maskTokens(parsed), null, 2).replace(/\n/g, '\n  '));
+  return { status: res.status, body: parsed, ok: res.ok, headers: res.headers };
+}
+
+/* ---------- ① 连接与账户 ---------- */
+async function checkHealth() {
+  await call('GET', '/health/ready', null, { auth: false });
+}
+
+function randomName() {
+  document.getElementById('username').value = 'demo_' + Math.floor(Math.random() * 100000);
+}
+
+async function register() {
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  if (!username) return log('err', '请先填用户名或点"随机"');
+  const r = await call('POST', '/auth/register', { username, password }, { auth: false, idempotencyKey: 'reg-' + username });
+  if (r && r.ok) log('meta', '注册成功，现在可以点"登录"');
+}
+
+async function login() {
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  const r = await call('POST', '/auth/login', { username, password }, { auth: false });
+  if (r && r.ok && r.body.data) {
+    access = r.body.data.access_token;
+    refresh = r.body.data.refresh_token;
+    authEl.textContent = `已登录（${username}），access 前 8 位：${access.slice(0, 8)}…`;
+    authEl.className = 'token';
+  }
+}
+
+async function me() {
+  const r = await call('GET', '/me');
+  if (r && r.status === 401) log('meta', '未登录或令牌已失效，请重新登录');
+}
+
+async function logout() {
+  await call('POST', '/auth/logout');
+  access = null; refresh = null;
+  authEl.textContent = '未登录';
+  authEl.className = '';
+}
+
+/* ---------- ② 签到与积分 ---------- */
+async function rewardState() { await call('GET', '/rewards/daily'); }
+
+async function claim() {
+  const r = await call('POST', '/rewards/daily/claim', null, { idempotencyKey: 'claim-' + Date.now() });
+  if (r && r.status === 409) log('meta', '今天已经领过了 —— 409 是预期行为，余额不会重复增加');
+}
+
+async function claimSameKey() {
+  const key = window.__lastClaimKey || ('claim-' + Date.now());
+  window.__lastClaimKey = key;
+  const r = await call('POST', '/rewards/daily/claim', null, { idempotencyKey: key });
+  if (r && r.status === 200) log('meta', '幂等键重放成功：返回首次结果，没有重复发放');
+}
+
+async function wallet() { await call('GET', '/wallet'); }
+async function ledger() { await call('GET', '/wallet/ledger?limit=10'); }
+
+/* ---------- ③ 商品与订单 ---------- */
+async function products() { await call('GET', '/products'); }
+
+async function createOrder() {
+  const product = document.getElementById('product').value;
+  const key = 'order-' + Date.now();
+  const r = await call('POST', '/orders', { product_id: product }, { idempotencyKey: key });
+  if (r && r.ok && r.body.data) {
+    orderId = r.body.data.order_id;
+    log('meta', '订单已创建：' + orderId + '（金额由服务端决定，客户端传的金额会被忽略）');
+  }
+}
+
+async function mockPay(status) {
+  if (!orderId) return log('err', '请先下单');
+  await call('POST', '/payments/mock/webhook', {
+    event_id: 'evt-' + Date.now(),
+    order_id: orderId,
+    status,
+  }, {
+    auth: false,
+    extra: { 'X-Mock-Token': document.getElementById('mockToken')?.value || 'local-test-token' },
+  });
+}
+
+async function queryOrder() {
+  if (!orderId) return log('err', '请先下单');
+  await call('GET', '/orders/' + orderId);
+}
+
+/* ---------- ④ 同步 ---------- */
+async function syncPush() {
+  const batch = 'batch-' + Date.now();
+  const r = await call('POST', '/sync/push', {
+    batch_id: batch,
+    device_id: 'demo-device',
+    mutations: [
+      { object_type: 'task', object_id: 'task-' + Date.now(), op: 'create', payload: { title: '写周报', done: false } },
+      { object_type: 'block', object_id: 'block-' + Date.now(), op: 'create', payload: { locked: true, start: 1700000000000, end: 1700003600000 } },
+    ],
+  });
+  if (r && r.ok) window.__lastBatch = batch;
+}
+
+async function syncPull() {
+  const r = await call('GET', '/sync/pull?cursor=' + cursor);
+  if (r && r.ok && r.body.data) cursor = r.body.data.next_cursor;
+}
+
+async function syncConflict() {
+  const id = 'conflict-' + Date.now();
+  await call('POST', '/sync/push', {
+    batch_id: 'b1-' + Date.now(), device_id: 'demo-device',
+    mutations: [{ object_type: 'task', object_id: id, op: 'create', payload: { v: 1 } }],
+  });
+  await call('POST', '/sync/push', {
+    batch_id: 'b2-' + Date.now(), device_id: 'demo-device',
+    mutations: [{ object_type: 'task', object_id: id, op: 'update', expected_version: 99, payload: { v: 2 } }],
+  });
+  log('meta', '第二条应当是 conflict / version_mismatch，并回传服务端版本 1');
+}
+
+/* 初始化 */
+randomName();
+fetch(base() + '/health/live').then(r => {
+  log(r.ok ? 'ok' : 'err', r.ok ? '本地服务已连接：' + base() : '服务未响应，请先 node src/main.ts');
+}).catch(() => log('err', '无法连接 ' + base() + '，请先启动服务端'));
+log('meta', '顺序建议：注册 → 登录 → 查签到 → 领取 → 钱包 → 下单 → 模拟支付 → 查订单 → 同步');
+</script>
+</body>
+</html>
