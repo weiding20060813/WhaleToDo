@@ -464,6 +464,16 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   })();
   app.get('/demo', async (_req, reply) => reply.type('text/html; charset=utf-8').send(demoHtml));
 
+  // 网页端原型：真调接口的待办/签到页面（不动仓库 web/ 官网）
+  const appHtml = (() => {
+    try {
+      return readFileSync(new URL('../../public/app.html', import.meta.url), 'utf8');
+    } catch {
+      return '<h1>app.html 未找到（应在 server/public/app.html）</h1>';
+    }
+  })();
+  app.get('/app', async (_req, reply) => reply.type('text/html; charset=utf-8').send(appHtml));
+
   app.get('/api/v1/meta', async (req) => ok(req.requestId, {
     api_version: 'v1',
     base_url: config.publicBaseUrl,

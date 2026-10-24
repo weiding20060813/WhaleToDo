@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WhaleToDo 网页端原型</title>
+<style>
+  :root { color-scheme: dark; --bg:#0e1015; --card:#161a22; --line:#242a35; --fg:#e7eaf0; --muted:#8b94a3; --accent:#3b82f6; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  h1 { font-size:16px; margin:0; font-weight:600; }
+  .badge { font-size:12px; color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:2px 10px; }
+  main { max-width:1080px; margin:0 auto; padding:20px; display:grid; grid-template-columns:1.35fr 1fr; gap:16px; }
+  @media (max-width:860px){ main{ grid-template-columns:1fr; } }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  h2 { font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin:0 0 12px; }
+  .row { display:flex; gap:8px; margin-bottom:10px; }
+  input { flex:1; min-width:0; padding:9px 11px; border-radius:8px; border:1px solid var(--line); background:#1b212b; color:var(--fg); font:inherit; }
+  button { padding:9px 13px; border-radius:8px; border:1px solid #2c3546; background:#212a37; color:var(--fg); font:inherit; cursor:pointer; white-space:nowrap; }
+  button:hover { background:#2a3648; }
+  button.primary { background:var(--accent); border-color:var(--accent); }
+  button.primary:hover { background:#2f6fd8; }
+  button.ghost { background:transparent; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  ul { list-style:none; margin:0; padding:0; }
+  li { display:flex; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid #1d2330; }
+  li:last-child { border-bottom:none; }
+  li.done .title { text-decoration:line-through; color:var(--muted); }
+  .title { flex:1; word-break:break-word; }
+  .check { width:20px; height:20px; border-radius:6px; border:1px solid #39445a; background:#151a23; cursor:pointer; flex:0 0 auto; }
+  li.done .check { background:var(--accent); border-color:var(--accent); }
+  .del { color:#f87171; background:transparent; border:none; }
+  .stat { display:flex; justify-content:space-between; padding:6px 0; color:var(--muted); font-size:13px; }
+  .stat b { color:var(--fg); font-weight:600; }
+  #log { grid-column:1/-1; background:#0a0c11; border:1px solid var(--line); border-radius:12px; padding:12px; max-height:220px; overflow:auto;
+         font:12px/1.55 ui-monospace,Consolas,monospace; }
+  .entry { margin-bottom:6px; white-space:pre-wrap; word-break:break-all; }
+  .ok { color:#6ee7a8; } .err { color:#f87171; } .req { color:#7dd3fc; } .meta { color:#94a3b8; }
+  .hidden { display:none !important; }
+  .hint { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🐋 WhaleToDo 网页端原型</h1>
+  <span class="badge" id="who">未登录</span>
+  <span class="badge" id="syncBadge">cursor 0</span>
+  <button class="ghost" id="btnLogout" onclick="logout()" style="margin-left:auto" >退出</button>
+</header>
+
+<main>
+  <!-- 登录 -->
+  <section id="authCard">
+    <h2>登录 / 注册</h2>
+    <div class="row"><input id="u" placeholder="用户名（3~32 位字母数字下划线）" /></div>
+    <div class="row"><input id="p" type="password" placeholder="密码（至少 8 位）" value="S3cret-passw0rd" /></div>
+    <div class="row">
+      <button class="primary" onclick="login()">登录</button>
+      <button onclick="register()">注册</button>
+    </div>
+    <p class="hint">原型不把令牌写入浏览器存储：刷新页面需重新登录。生产版应使用安全存储。</p>
+  </section>
+
+  <!-- 待办 -->
+  <section id="todoCard" class="hidden">
+    <h2>待办（与后端同步）</h2>
+    <div class="row">
+      <input id="taskInput" placeholder="写点什么，回车添加" onkeydown="if(event.key==='Enter')addTask()" />
+      <button class="primary" onclick="addTask()">添加</button>
+    </div>
+    <ul id="taskList"></ul>
+    <p class="hint" id="emptyHint">还没有待办。添加后会自动 push 到服务端。</p>
+    <div class="row" style="margin-top:10px">
+      <button onclick="pullAll()">从服务端重新拉取</button>
+    </div>
+  </section>
+
+  <!-- 侧栏 -->
+  <section id="sideCard" class="hidden">
+    <h2>签到与积分</h2>
+    <div class="stat"><span>业务日（服务端时区）</span><b id="bizDate">-</b></div>
+    <div class="stat"><span>今日签到</span><b id="claimState">-</b></div>
+    <div class="stat"><span>可用积分</span><b id="points">-</b></div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" onclick="claim()" id="claimBtn">领取签到</button>
+      <button onclick="refreshReward()">刷新</button>
+    </div>
+    <h2 style="margin-top:20px">同步状态</h2>
+    <div class="stat"><span>本地游标</span><b id="cursorVal">0</b></div>
+    <div class="stat"><span>待办数量</span><b id="taskCount">0</b></div>
+  </section>
+
+  <div id="log"></div>
+</main>
+
+<script>
+"use strict";
+const BASE = location.origin + "/api/v1";
+const state = { access: null, user: null, cursor: 0, tasks: new Map() };
+
+/* ---------- 日志 ---------- */
+const logEl = document.getElementById("log");
+function log(kind, text) {
+  const d = document.createElement("div");
+  d.className = "entry " + kind; d.textContent = text;
+  logEl.appendChild(d); logEl.scrollTop = logEl.scrollHeight;
+}
+
+/* ---------- HTTP ---------- */
+async function api(method, path, body, opts = {}) {
+  const headers = { "Accept": "application/json" };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (state.access) headers["Authorization"] = "Bearer " + state.access;
+  if (opts.idempotencyKey) headers["Idempotency-Key"] = opts.idempotencyKey;
+  log("req", `→ ${method} ${path}`);
+  const res = await fetch(BASE + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const text = await res.text();
+  let json = null; try { json = JSON.parse(text); } catch {}
+  if (res.ok) log("ok", `← ${res.status} ${path}`);
+  else log("err", `← ${res.status} ${path} ${json?.error?.code || ""} ${json?.error?.message || text.slice(0,120)}`);
+  return { status: res.status, ok: res.ok, body: json, text };
+}
+
+/* ---------- 登录 ---------- */
+async function register() {
+  const username = document.getElementById("u").value.trim();
+  const password = document.getElementById("p").value;
+  if (!username) return log("err", "请填用户名");
+  await api("POST", "/auth/register", { username, password }, { idempotencyKey: "web-reg-" + username });
+}
+
+async function login() {
+  const username = document.getElementById("u").value.trim();
+  const password = document.getElementById("p").value;
+  const r = await api("POST", "/auth/login", { username, password });
+  if (!r.ok) return;
+  state.access = r.body.data.access_token;
+  state.user = r.body.data.user;
+  document.getElementById("who").textContent = "已登录：" + username;
+  document.getElementById("authCard").classList.add("hidden");
+  document.getElementById("todoCard").classList.remove("hidden");
+  document.getElementById("sideCard").classList.remove("hidden");
+  await pullAll(true);
+  await refreshReward();
+}
+
+function logout() {
+  state.access = null; state.user = null; state.cursor = 0; state.tasks.clear();
+  render();
+  document.getElementById("who").textContent = "未登录";
+  document.getElementById("authCard").classList.remove("hidden");
+  document.getElementById("todoCard").classList.add("hidden");
+  document.getElementById("sideCard").classList.add("hidden");
+  log("meta", "已退出（前端令牌已清空）");
+}
+
+/* ---------- 同步：push / pull ---------- */
+function uuid() { return crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2); }
+
+async function push(mutations) {
+  const r = await api("POST", "/sync/push", {
+    batch_id: "web-" + uuid(), device_id: "web-prototype", mutations,
+  });
+  if (!r.ok) return null;
+  for (const item of r.body.data.items) {
+    if (item.result === "conflict") {
+      log("meta", `冲突：${item.reason}（服务端版本 ${item.server_version}），自动重新拉取`);
+      await pullAll(true);
+      return null;
+    }
+    if (item.result === "rejected") {
+      log("err", `被拒绝：${item.reason}`);
+      return null;
+    }
+  }
+  return r.body.data;
+}
+
+async function pullAll(reset = false) {
+  if (reset) { state.cursor = 0; state.tasks.clear(); }
+  let guard = 0;
+  while (guard++ < 20) {
+    const r = await api("GET", "/sync/pull?cursor=" + state.cursor + "&limit=100");
+    if (!r.ok) break;
+    for (const c of r.body.data.changes) {
+      if (c.object_type !== "task") continue;
+      if (c.deleted) state.tasks.delete(c.object_id);
+      else state.tasks.set(c.object_id, { id: c.object_id, version: c.version, ...c.payload });
+    }
+    state.cursor = r.body.data.next_cursor;
+    if (!r.body.data.has_more) break;
+  }
+  render();
+  log("meta", `已同步：${state.tasks.size} 条待办，cursor=${state.cursor}`);
+}
+
+async function addTask() {
+  const input = document.getElementById("taskInput");
+  const text = input.value.trim();
+  if (!text) return;
+  const id = uuid();
+  const ok = await push([{ object_type: "task", object_id: id, op: "create", payload: { title: text, done: false } }]);
+  if (ok) { input.value = ""; await pullAll(); }
+}
+
+async function toggleTask(id) {
+  const t = state.tasks.get(id);
+  if (!t) return;
+  const ok = await push([{
+    object_type: "task", object_id: id, op: "update",
+    expected_version: t.version, payload: { title: t.title, done: !t.done },
+  }]);
+  if (ok) await pullAll();
+}
+
+async function deleteTask(id) {
+  const t = state.tasks.get(id);
+  if (!t) return;
+  const ok = await push([{ object_type: "task", object_id: id, op: "delete", expected_version: t.version }]);
+  if (ok) await pullAll();
+}
+
+/* ---------- 渲染 ---------- */
+function render() {
+  const list = document.getElementById("taskList");
+  list.innerHTML = "";
+  const items = [...state.tasks.values()].sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+  for (const t of items) {
+    const li = document.createElement("li");
+    if (t.done) li.className = "done";
+    const cb = document.createElement("button");
+    cb.className = "check"; cb.setAttribute("aria-label", "切换完成");
+    cb.onclick = () => toggleTask(t.id);
+    const span = document.createElement("span");
+    span.className = "title"; span.textContent = t.title || "(空)";
+    const del = document.createElement("button");
+    del.className = "del"; del.textContent = "删除"; del.onclick = () => deleteTask(t.id);
+    li.append(cb, span, del);
+    list.appendChild(li);
+  }
+  document.getElementById("emptyHint").classList.toggle("hidden", items.length > 0);
+  document.getElementById("taskCount").textContent = String(items.length);
+  document.getElementById("cursorVal").textContent = String(state.cursor);
+  document.getElementById("syncBadge").textContent = "cursor " + state.cursor;
+}
+
+/* ---------- 签到 ---------- */
+async function refreshReward() {
+  const r = await api("GET", "/rewards/daily");
+  if (!r.ok) return;
+  const d = r.body.data;
+  document.getElementById("bizDate").textContent = d.business_date;
+  document.getElementById("claimState").textContent = d.claimed ? "已领取" : "未领取";
+  document.getElementById("points").textContent = String(d.balance.available);
+  document.getElementById("claimBtn").disabled = d.claimed;
+}
+
+async function claim() {
+  const r = await api("POST", "/rewards/daily/claim", undefined, { idempotencyKey: "web-claim-" + new Date().toISOString().slice(0,10) });
+  if (r.ok) { document.getElementById("points").textContent = String(r.body.data.wallet.available); await refreshReward(); }
+  else if (r.status === 409) { log("meta", "今天已经领过"); await refreshReward(); }
+}
+
+/* 启动自检 */
+api("GET", "/health/live").catch(() => log("err", "服务端未响应"));
+log("meta", "先注册再登录；登录后会自动拉取云端待办。");
+</script>
+</body>
+</html>
