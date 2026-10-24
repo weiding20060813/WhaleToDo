@@ -10,6 +10,8 @@ import { claimDailyReward, paginateLedger, DEFAULT_REWARD_POINTS } from '../doma
 import type { LedgerRow } from '../domain/rewards.ts';
 import { buildOrder, applyPaymentResult, assertMockWebhookAllowed } from '../domain/billing.ts';
 import type { Order, Product, Entitlement } from '../domain/billing.ts';
+import { applyMutation, batchStatus, pullChanges, parsePushBody } from '../domain/sync.ts';
+import type { SyncObject, SyncMutationResult } from '../domain/sync.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -393,6 +395,62 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       entitlement: applied.entitlement ? { kind: applied.entitlement.kind, expires_at: applied.entitlement.expiresAt } : null,
       duplicated: false,
     }));
+  });
+
+/* ---------- 同步（内存实现；接 Prisma 后按 sync_batches/sync_mutations 落库） ---------- */
+  const syncObjects = new Map<string, SyncObject>();          // `${type}:${id}`
+  const syncLog: Array<{ seq: number; object_type: string; object_id: string; version: number; deleted: boolean; payload: unknown }> = [];
+  const syncReceipts = new Map<string, unknown>();            // `${userId}:${batchId}` -> receipt
+  let syncSeq = 0;
+
+  app.post('/api/v1/sync/push', async (req, reply) => {
+    await requireAuth(req);
+    const { batchId, deviceId, mutations } = parsePushBody(req.body);
+
+    // 批次幂等：同一 batch_id 重放直接返回首次回执
+    const receiptKey = `${req.userId}:${batchId}`;
+    const existed = syncReceipts.get(receiptKey);
+    if (existed) return reply.code(200).send(existed);
+
+    const now = Date.now();
+    const results: SyncMutationResult[] = [];
+    for (const m of mutations) {
+      const key = `${m.objectType}:${m.objectId}`;
+      const current = syncObjects.get(key) ?? null;
+      const outcome = applyMutation(current, m, syncSeq + 1, now);
+      if (outcome.object) {
+        syncSeq += 1;
+        syncObjects.set(key, outcome.object);
+        syncLog.push({
+          seq: outcome.object.seq, object_type: outcome.object.type, object_id: outcome.object.id,
+          version: outcome.object.version, deleted: outcome.object.deleted, payload: outcome.object.payload,
+        });
+      }
+      results.push(outcome.result);
+    }
+
+    const receipt = ok(req.requestId, {
+      batch_id: batchId, device_id: deviceId, status: batchStatus(results),
+      items: results, server_cursor: syncSeq,
+    });
+    syncReceipts.set(receiptKey, receipt);
+    return reply.code(200).send(receipt);
+  });
+
+  app.get('/api/v1/sync/pull', async (req) => {
+    await requireAuth(req);
+    const q = (req.query ?? {}) as { cursor?: string; limit?: string };
+    const cursor = Number(q.cursor ?? 0);
+    if (!Number.isFinite(cursor) || cursor < 0) throw new ApiError('VALIDATION_ERROR', 'cursor 非法');
+    const page = pullChanges(syncLog, cursor, Number(q.limit ?? 100));
+    return ok(req.requestId, {
+      changes: page.items.map((c) => ({
+        object_type: c.object_type, object_id: c.object_id,
+        version: c.version, deleted: c.deleted, payload: c.payload,
+      })),
+      next_cursor: page.next_cursor,
+      has_more: page.has_more,
+    });
   });
 
   app.get('/api/v1/meta', async (req) => ok(req.requestId, {
