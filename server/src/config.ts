@@ -16,6 +16,10 @@ export interface ServerConfig {
    * 部署时**只应信任回环或实际代理地址**，不能对任意来源盲信 X-Forwarded-*。
    */
   trustProxy: boolean | string;
+  /** 日志级别：debug | info | warn | error */
+  logLevel: string;
+  /** 日志文件路径（可选；不设则只输出到 stdout） */
+  logFile: string | null;
 }
 
 const ALLOWED_ENVS = ['development', 'test', 'demo', 'production'] as const;
@@ -83,6 +87,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     mockWebhookToken,
     publicBaseUrl: (env.PUBLIC_BASE_URL ?? 'http://127.0.0.1:8080/api/v1').replace(/\/$/, ''),
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
+    logLevel: (env.LOG_LEVEL ?? 'info').trim(),
+    logFile: (env.LOG_FILE ?? '').trim() || null,
   };
 }
 

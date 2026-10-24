@@ -56,8 +56,21 @@ function fingerprintOf(body: unknown): string {
 
 export function buildApp(deps: AppDeps): FastifyInstance {
   const { config, repo } = deps;
+  // 日志：不记请求体；鉴权头/幂等键/模拟支付令牌脱敏；
+  // 关闭默认的 incoming/completed 两行，改为 onResponse 输出一条结构化访问日志。
+  const loggerOptions = {
+    level: config.logLevel,
+    redact: [
+      'req.headers.authorization',
+      'req.headers.cookie',
+      'req.headers["idempotency-key"]',
+      'req.headers["x-mock-token"]',
+      'res.headers["set-cookie"]',
+    ],
+  };
   const app = Fastify({
-    logger: deps.logger ?? false,
+    logger: deps.logger ? { ...loggerOptions, ...(config.logFile ? { file: config.logFile } : {}) } : false,
+    disableRequestLogging: true,
     trustProxy: config.trustProxy,
     genReqId: () => randomUUID(),
   });
@@ -69,8 +82,24 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     req.raw.headers['x-request-id'] = req.requestId;
   });
 
+  // 每个请求一条访问日志：request_id / 方法 / 路径(不含 query) / 状态码 / 耗时 / user_id / 错误码
+  app.addHook('onResponse', async (req: FastifyRequest, reply: FastifyReply) => {
+    const errCode = (reply as FastifyReply & { errorCode?: string }).errorCode ?? null;
+    req.log.info({
+      event: 'access',
+      request_id: req.requestId,
+      method: req.method,
+      path: req.url.split('?')[0],
+      status: reply.statusCode,
+      duration_ms: Math.round(reply.elapsedTime * 10) / 10,
+      user_id: req.userId ?? null,
+      error_code: errCode,
+    }, 'access');
+  });
+
   app.setErrorHandler((err, req: FastifyRequest, reply: FastifyReply) => {
     if (err instanceof ApiError) {
+      (reply as FastifyReply & { errorCode?: string }).errorCode = err.code;
       return reply.code(err.status).send(err.toBody(req.requestId));
     }
     const status = (err as { statusCode?: number }).statusCode ?? 500;
