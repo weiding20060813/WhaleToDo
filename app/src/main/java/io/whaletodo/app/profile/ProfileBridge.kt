@@ -11,6 +11,8 @@ enum class AvatarSource { GALLERY,CAMERA }
 enum class CodePurpose { REGISTER,RESET_PASSWORD }
 data class VerificationDispatch(val resendAfterSeconds:Int=60)
 class ProfileUnavailable:Exception()
+/** User-facing account failure; message is safe to show and never contains credentials. */
+class ProfileException(message:String):Exception(message)
 interface ProfileBridge {
     val details:StateFlow<ProfileDetails?>
     suspend fun login(email:String,password:String):Unit=throw ProfileUnavailable()

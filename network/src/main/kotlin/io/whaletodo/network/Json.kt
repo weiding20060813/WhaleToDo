@@ -22,6 +22,28 @@ internal object Json {
         return regex.find(json)?.groupValues?.getOrNull(1)?.toLongOrNull()
     }
 
+    /** 读取布尔字段 */
+    fun booleanField(json: String, key: String): Boolean? {
+        val regex = Regex("\"${Regex.escape(key)}\"\\s*:\\s*(true|false)")
+        return regex.find(json)?.groupValues?.getOrNull(1)?.toBooleanStrictOrNull()
+    }
+
+    /** 生成 JSON 字符串字面量；调用方只传非敏感字段 */
+    fun quote(value: String): String = buildString(value.length + 2) {
+        append('"')
+        value.forEach { c ->
+            when (c) {
+                '"' -> append("\\\"")
+                '\\' -> append("\\\\")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> if (c < ' ') append("\\u%04x".format(c.code)) else append(c)
+            }
+        }
+        append('"')
+    }
+
     private fun unescape(s: String): String {
         if (!s.contains('\\')) return s
         val sb = StringBuilder(s.length)

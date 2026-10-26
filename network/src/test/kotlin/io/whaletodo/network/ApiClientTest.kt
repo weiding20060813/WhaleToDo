@@ -12,6 +12,7 @@ import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import java.net.InetSocketAddress
+import java.time.Instant
 
 /**
  * 用 JDK 自带 HttpServer 起一个假后端，验证客户端的真实 HTTP 行为：
@@ -219,5 +220,107 @@ class ApiClientTest {
         val res = client(store).get("/wallet")
         assertTrue(res.isSuccess)
         assertFalse(res.body.isEmpty())
+    }
+
+    /* ---------------- 邮箱账户 ---------------- */
+
+    @Test
+    fun `邮箱登录发送 email 字段并保存令牌`() {
+        handler { Pair(200, """{"request_id":"r","data":{"access_token":"acc","refresh_token":"ref"}}""") }
+        val store = InMemoryTokenStore()
+        AuthApi(client(store), store).loginWithEmail("a@example.invalid", "S3cret-passw0rd")
+        val call = calls.single()
+        assertEquals("/api/v1/auth/login", call.path)
+        assertTrue(call.body.contains("\"email\":\"a@example.invalid\""))
+        assertFalse(call.body.contains("\"username\""))
+        assertEquals(TokenPair("acc", "ref"), store.read())
+    }
+
+    @Test
+    fun `发码与验证返回 ticket`() {
+        handler { call ->
+            when (call.path) {
+                "/api/v1/auth/email/send-code" ->
+                    Pair(202, """{"request_id":"r","data":{"sent":true,"retry_after_ms":45000}}""")
+                "/api/v1/auth/email/verify" ->
+                    Pair(200, """{"request_id":"r","data":{"ticket":"ticket-1","expires_in":60}}""")
+                else -> Pair(404, """{"error":{"code":"VALIDATION_ERROR","message":"?"}}""")
+            }
+        }
+        val api = AuthApi(client(), InMemoryTokenStore())
+        val dispatch = api.sendEmailCode("a@example.invalid", "register")
+        assertTrue(dispatch.sent)
+        assertEquals(45_000L, dispatch.retryAfterMs)
+        assertTrue(calls.first().body.contains("\"purpose\":\"register\""))
+
+        val ticket = api.verifyEmailCode("a@example.invalid", "123456", "register")
+        assertEquals("ticket-1", ticket.ticket)
+        assertEquals(60, ticket.expiresInSeconds)
+        assertTrue(calls.last().body.contains("\"code\":\"123456\""))
+    }
+
+    @Test
+    fun `邮箱注册与重置使用 ticket`() {
+        handler { call ->
+            when (call.path) {
+                "/api/v1/auth/register/email" -> Pair(
+                    201,
+                    """{"request_id":"r","data":{"user":{"id":"u1","username":"whale_0123456789ab","display_name":"阿鲸"}}}""",
+                )
+                "/api/v1/auth/password/reset" -> Pair(204, "")
+                else -> Pair(404, """{"error":{"code":"VALIDATION_ERROR","message":"?"}}""")
+            }
+        }
+        val api = AuthApi(client(), InMemoryTokenStore())
+        val user = api.registerWithEmail("a@example.invalid", "ticket-1", "S3cret-passw0rd", "阿鲸")
+        assertEquals("u1", user.id)
+        assertEquals("whale_0123456789ab", user.username)
+        assertEquals("阿鲸", user.displayName)
+        assertTrue(calls.first().body.contains("\"ticket\":\"ticket-1\""))
+        assertTrue(calls.first().body.contains("\"display_name\":\"阿鲸\""))
+
+        api.resetPassword("a@example.invalid", "ticket-2", "N3w-secret-passw0rd")
+        assertTrue(calls.last().body.contains("\"ticket\":\"ticket-2\""))
+    }
+
+    @Test
+    fun `资料权益钱包与签到响应解析`() {
+        handler { call ->
+            when (call.path) {
+                "/api/v1/me" -> Pair(
+                    200,
+                    """{"request_id":"r","data":{"user":{"id":"u1","username":"whale_0123456789ab","display_name":"阿鲸","created_at":"2026-10-26T00:00:00Z"}}}""",
+                )
+                "/api/v1/me/entitlements" -> Pair(
+                    200,
+                    """{"request_id":"r","data":{"vip":{"active":true,"expires_at":"2026-11-26T00:00:00Z"},"balance":{"available":7,"reserved":0}}}""",
+                )
+                "/api/v1/wallet" -> Pair(200, """{"request_id":"r","data":{"available":7,"reserved":0,"total":7}}""")
+                "/api/v1/rewards/daily/claim" -> Pair(
+                    201,
+                    """{"request_id":"r","data":{"business_date":"2026-10-26","points_awarded":1,"wallet":{"available":8,"reserved":0}}}""",
+                )
+                "/api/v1/rewards/daily" -> Pair(
+                    200,
+                    """{"request_id":"r","data":{"business_date":"2026-10-26","claimed":true}}""",
+                )
+                else -> Pair(404, """{"error":{"code":"VALIDATION_ERROR","message":"?"}}""")
+            }
+        }
+        val store = InMemoryTokenStore(TokenPair("a", "r"))
+        val api = AuthApi(client(store), store)
+        assertEquals("u1", api.me().id)
+        assertEquals("阿鲸", api.me().displayName)
+        val ent = api.entitlements()
+        assertTrue(ent.vipActive)
+        assertEquals(Instant.parse("2026-11-26T00:00:00Z"), ent.vipExpiresAt)
+        assertEquals(7, api.wallet().available)
+        val claim = api.claimDailyReward("idem-1")
+        assertEquals("2026-10-26", claim.businessDate)
+        assertEquals(1, claim.pointsAwarded)
+        assertEquals(8, claim.availablePoints)
+        assertEquals("2026-10-26", api.dailyReward().businessDate)
+        assertEquals("Bearer a", calls.first().auth)
+        assertEquals("idem-1", calls.first { it.path.endsWith("/claim") }.idem)
     }
 }

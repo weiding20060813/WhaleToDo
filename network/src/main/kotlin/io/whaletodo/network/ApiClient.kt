@@ -54,12 +54,15 @@ class ApiClient(
     ): ApiResponse {
         var response = execute(method, path, body, auth, idempotencyKey)
         if (response.status == 401 && auth) {
-            val refreshed = refreshTokens()
+            val refreshed = try {
+                refreshTokens()
+            } catch (_: Exception) {
+                false
+            }
             if (refreshed) {
                 response = execute(method, path, body, auth, idempotencyKey)
-            } else {
-                tokenStore.clear()
             }
+            if (!refreshed || response.status == 401) tokenStore.clear()
         }
         if (!response.isSuccess) throw toException(response)
         return response

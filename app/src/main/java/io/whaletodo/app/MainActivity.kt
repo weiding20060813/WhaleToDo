@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.whaletodo.app.data.*
+import io.whaletodo.app.account.installAccount
 import io.whaletodo.app.ui.*
 import io.whaletodo.core.*
 import io.whaletodo.app.agent.*
@@ -49,6 +50,7 @@ private fun local(ms: Long, zone:ZoneId) = Instant.ofEpochMilli(ms).atZone(zone)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installAccount(this)
         enableEdgeToEdge()
         setContent {
             val prefs = remember { getSharedPreferences("appearance", android.content.Context.MODE_PRIVATE) }

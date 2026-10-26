@@ -54,7 +54,8 @@ class ProfileController(private val repo:DeskRepository,private val scope:Corout
     private fun action(error:String="暂时无法完成，请稍后重试",block:suspend (String)->Unit) {
         val owner=mutable.value.owner;if(mutable.value.busy)return
         mutable.update{it.copy(busy=true,error="")}
-        scope.launch{try{block(owner)}catch(e:CancellationException){throw e}catch(_:Exception){mutable.update{if(it.owner==owner)it.copy(error=error)else it}}
+        scope.launch{try{block(owner)}catch(e:CancellationException){throw e}catch(e:ProfileException){mutable.update{if(it.owner==owner)it.copy(error=e.message?:"暂时无法完成，请稍后重试")else it}}
+            catch(_:Exception){mutable.update{if(it.owner==owner)it.copy(error=error)else it}}
             finally{mutable.update{if(it.owner==owner)it.copy(busy=false)else it}}}
     }
     fun saveUserOption(key:String,value:String)=action {owner->repo.dao.save(UiPreferenceRow(owner,key,value));dismissAfter(owner)}
